@@ -1,0 +1,96 @@
+{
+  "name": "accsnipe",
+  "displayName": "AccSnipe",
+  "description": "Antigravity Google Account Quota Tracker & Account Switcher",
+  "version": "0.1.0",
+  "publisher": "accsnipe",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onView:accsnipe.views.sidebar"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "accsnipe-container",
+          "title": "AccSnipe",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "accsnipe-container": [
+        {
+          "type": "webview",
+          "id": "accsnipe.views.sidebar",
+          "name": "Accounts & Quotas"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "accsnipe.addAccount",
+        "title": "AccSnipe: Add Google Account",
+        "icon": "$(plus)"
+      },
+      {
+        "command": "accsnipe.refreshQuotas",
+        "title": "AccSnipe: Refresh All Quotas",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "accsnipe.switchAccount",
+        "title": "AccSnipe: Switch Active Account"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "accsnipe.addAccount",
+          "when": "view == accsnipe.views.sidebar",
+          "group": "navigation@1"
+        },
+        {
+          "command": "accsnipe.refreshQuotas",
+          "when": "view == accsnipe.views.sidebar",
+          "group": "navigation@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "AccSnipe",
+      "properties": {
+        "accsnipe.pollingIntervalMinutes": {
+          "type": "number",
+          "default": 5,
+          "description": "Interval in minutes for automatic background quota polling"
+        },
+        "accsnipe.autoReloadOnSwitch": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically reload window immediately upon switching accounts without prompting"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap",
+    "watch": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.20.1",
+    "typescript": "^5.4.2",
+    "vitest": "^1.4.0"
+  }
+}
