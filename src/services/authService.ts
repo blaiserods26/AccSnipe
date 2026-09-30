@@ -113,7 +113,7 @@ export class AuthService {
           client_id: clientId,
           redirect_uri: redirectUri,
           response_type: 'code',
-          scope: 'openid email profile https://www.googleapis.com/auth/cloud-platform',
+          scope: 'openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/cloud-platform',
           access_type: 'offline',
           prompt: 'consent select_account',
           code_challenge: codeChallenge,
@@ -233,18 +233,36 @@ export class AuthService {
    * Fetches the user profile (email and display name) using an access token
    */
   public async fetchUserProfile(accessToken: string): Promise<{ email: string; name: string }> {
-    const response = await fetch(GOOGLE_USERINFO_ENDPOINT, {
-      headers: { Authorization: `Bearer ${accessToken}` }
-    });
+    try {
+      const response = await fetch(GOOGLE_USERINFO_ENDPOINT, {
+        headers: { Authorization: `Bearer ${accessToken}` }
+      });
 
-    if (!response.ok) {
-      throw new Error(`Failed to fetch user profile: ${response.statusText}`);
+      if (response.ok) {
+        const json: any = await response.json();
+        if (json.email) {
+          return {
+            email: json.email,
+            name: json.name || json.email.split('@')[0]
+          };
+        }
+      }
+    } catch {
+      // Fallback to tokeninfo
     }
 
-    const json: any = await response.json();
-    return {
-      email: json.email,
-      name: json.name || json.email
-    };
+    // Fallback: tokeninfo endpoint provides verified email for any valid Google token
+    const tokenInfoRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(accessToken)}`);
+    if (tokenInfoRes.ok) {
+      const tokenJson: any = await tokenInfoRes.json();
+      if (tokenJson.email) {
+        return {
+          email: tokenJson.email,
+          name: tokenJson.email.split('@')[0]
+        };
+      }
+    }
+
+    throw new Error('Could not retrieve account email from Google token.');
   }
 }
