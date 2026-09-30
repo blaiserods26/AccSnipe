@@ -17,11 +17,14 @@ export class EventEmitter<T> {
 export const window = {
   showInformationMessage: async () => {},
   showErrorMessage: async () => {},
-  showWarningMessage: async () => {}
+  showWarningMessage: async () => {},
+  showQuickPick: async () => undefined,
+  showInputBox: async () => undefined
 };
 
 export const commands = {
-  executeCommand: async () => {}
+  executeCommand: async () => {},
+  getCommands: async () => []
 };
 
 export const env = {
@@ -30,4 +33,20 @@ export const env = {
 
 export const Uri = {
   parse: (str: string) => ({ toString: () => str })
+};
+
+export const authentication = {
+  getSession: async (provider: string, scopes: string[], options: any) => ({
+    id: 'mock-session-id',
+    accessToken: 'mock-google-access-token',
+    account: { id: 'mock-google-acc-id', label: 'mock.user@gmail.com' },
+    scopes
+  }),
+  getAccounts: async () => []
+};
+
+export const workspace = {
+  getConfiguration: () => ({
+    get: (key: string, defaultVal: any) => defaultVal
+  })
 };

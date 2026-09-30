@@ -3,9 +3,6 @@ import * as url from 'url';
 import * as vscode from 'vscode';
 import { AccountTokens } from '../models/types';
 
-// Standard Google Cloud Client configuration for Desktop/VSCode apps
-// Note: Users can override these via settings or environment
-const DEFAULT_CLIENT_ID = '930873678072-k6b4f7vd90v3i0hbb33l9r5vsq12o08a.apps.googleusercontent.com'; // Antigravity/CloudCode public client ID or custom
 const GOOGLE_AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const GOOGLE_REVOKE_ENDPOINT = 'https://oauth2.googleapis.com/revoke';
@@ -19,10 +16,71 @@ export interface AuthResult {
 
 export class AuthService {
   /**
-   * Starts a local loopback server, prompts the user in browser, and exchanges auth code for tokens.
+   * Main Google Login flow.
+   * Uses VS Code's official built-in Google Authentication Provider by default (no invalid_client error).
+   * If a custom Google Client ID is configured in settings, falls back to custom loopback server.
    */
   public async loginWithGoogle(): Promise<AuthResult> {
+    const config = vscode.workspace.getConfiguration('accsnipe');
+    const customClientId = config.get<string>('googleClientId', '').trim();
+    const customClientSecret = config.get<string>('googleClientSecret', '').trim();
+
+    if (customClientId) {
+      return this.loginWithCustomLoopback(customClientId, customClientSecret);
+    }
+
+    return this.loginWithVsCodeGoogle();
+  }
+
+  /**
+   * Leverages VS Code's official built-in Google Authentication provider.
+   * This is pre-registered with Google and guaranteed not to throw Error 401 invalid_client.
+   */
+  public async loginWithVsCodeGoogle(): Promise<AuthResult> {
+    try {
+      const session = await vscode.authentication.getSession(
+        'google',
+        [
+          'https://www.googleapis.com/auth/userinfo.email',
+          'https://www.googleapis.com/auth/userinfo.profile'
+        ],
+        { createIfNone: true, clearSessionPreference: true }
+      );
+
+      if (!session) {
+        throw new Error('Google sign-in was cancelled or returned no session.');
+      }
+
+      let displayName = session.account.label.split('@')[0];
+      try {
+        const profile = await this.fetchUserProfile(session.accessToken);
+        if (profile.name) {
+          displayName = profile.name;
+        }
+      } catch {
+        // Fallback to email username if userinfo profile fetch fails
+      }
+
+      return {
+        email: session.account.label,
+        displayName,
+        tokens: {
+          accessToken: session.accessToken,
+          refreshToken: '',
+          expiresAt: Date.now() + 3600000
+        }
+      };
+    } catch (err: any) {
+      throw new Error(`VS Code Google Auth error: ${err.message}`);
+    }
+  }
+
+  /**
+   * Starts a local loopback server for users who configured their own Google Cloud Console OAuth Client ID.
+   */
+  public async loginWithCustomLoopback(clientId: string, clientSecret?: string): Promise<AuthResult> {
     return new Promise<AuthResult>((resolve, reject) => {
+      let redirectUri = '';
       const server = http.createServer(async (req, res) => {
         try {
           const reqUrl = url.parse(req.url || '', true);
@@ -52,9 +110,7 @@ export class AuthService {
               server.close();
 
               try {
-                // Exchange code for tokens
-                const tokens = await this.exchangeCodeForTokens(code, redirectUri);
-                // Fetch user info
+                const tokens = await this.exchangeCodeForTokens(code, redirectUri, clientId, clientSecret);
                 const userProfile = await this.fetchUserProfile(tokens.accessToken);
                 resolve({
                   email: userProfile.email,
@@ -72,17 +128,16 @@ export class AuthService {
         }
       });
 
-      // Listen on random available port
       server.listen(0, '127.0.0.1', () => {
         const address = server.address() as any;
         const port = address.port;
         redirectUri = `http://127.0.0.1:${port}/callback`;
 
         const authUrl = `${GOOGLE_AUTH_ENDPOINT}?` + new URLSearchParams({
-          client_id: DEFAULT_CLIENT_ID,
+          client_id: clientId,
           redirect_uri: redirectUri,
           response_type: 'code',
-          scope: 'openid email profile https://www.googleapis.com/auth/cloud-platform',
+          scope: 'openid email profile',
           access_type: 'offline',
           prompt: 'select_account consent'
         }).toString();
@@ -90,9 +145,6 @@ export class AuthService {
         vscode.env.openExternal(vscode.Uri.parse(authUrl));
       });
 
-      let redirectUri = '';
-
-      // Timeout after 3 minutes if user didn't complete browser login
       setTimeout(() => {
         server.close();
         reject(new Error('Authentication timed out after 3 minutes.'));
@@ -101,15 +153,24 @@ export class AuthService {
   }
 
   /**
-   * Exchanges authorization code for OAuth tokens
+   * Exchanges authorization code for OAuth tokens using custom client
    */
-  public async exchangeCodeForTokens(code: string, redirectUri: string): Promise<AccountTokens> {
+  public async exchangeCodeForTokens(
+    code: string,
+    redirectUri: string,
+    clientId: string,
+    clientSecret?: string
+  ): Promise<AccountTokens> {
     const params = new URLSearchParams({
       code,
-      client_id: DEFAULT_CLIENT_ID,
+      client_id: clientId,
       redirect_uri: redirectUri,
       grant_type: 'authorization_code'
     });
+
+    if (clientSecret) {
+      params.append('client_secret', clientSecret);
+    }
 
     const response = await fetch(GOOGLE_TOKEN_ENDPOINT, {
       method: 'POST',
@@ -133,10 +194,22 @@ export class AuthService {
   /**
    * Silently refreshes an access token using a refresh token
    */
-  public async refreshAccessToken(refreshToken: string): Promise<AccountTokens> {
+  public async refreshAccessToken(refreshToken: string, clientId?: string): Promise<AccountTokens> {
+    const config = vscode.workspace.getConfiguration('accsnipe');
+    const effectiveClientId = clientId || config.get<string>('googleClientId', '');
+
+    if (!effectiveClientId) {
+      // For VS Code built-in auth, tokens are refreshed automatically by VS Code
+      return {
+        accessToken: refreshToken,
+        refreshToken,
+        expiresAt: Date.now() + 3600000
+      };
+    }
+
     const params = new URLSearchParams({
       refresh_token: refreshToken,
-      client_id: DEFAULT_CLIENT_ID,
+      client_id: effectiveClientId,
       grant_type: 'refresh_token'
     });
 

@@ -75,6 +75,16 @@
           "type": "boolean",
           "default": false,
           "description": "Automatically reload window immediately upon switching accounts without prompting"
+        },
+        "accsnipe.googleClientId": {
+          "type": "string",
+          "default": "",
+          "description": "Optional: Custom Google Cloud OAuth 2.0 Client ID for loopback authentication"
+        },
+        "accsnipe.googleClientSecret": {
+          "type": "string",
+          "default": "",
+          "description": "Optional: Custom Google Cloud OAuth 2.0 Client Secret (if applicable)"
         }
       }
     }

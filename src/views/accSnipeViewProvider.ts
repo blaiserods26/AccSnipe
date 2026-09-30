@@ -96,6 +96,11 @@ export class AccSnipeViewProvider implements vscode.WebviewViewProvider {
           isActive: this.accountStore.getAccounts().length === 0
         }, result.tokens);
 
+        const added = this.accountStore.getAccounts().find(a => a.email === result.email);
+        if (added) {
+          await this.quotaService.fetchQuotaForAccount(added, result.tokens);
+        }
+
         vscode.window.showInformationMessage(`AccSnipe: Connected ${result.email}!`);
       } else {
         const email = await vscode.window.showInputBox({
