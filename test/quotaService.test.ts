@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { QuotaService } from '../src/services/quotaService';
 import { AccountMeta, AccountQuota } from '../src/models/types';
 
@@ -27,12 +27,16 @@ describe('QuotaService', () => {
     quotaService = new QuotaService();
   });
 
-  it('formats mock quota accurately for Pro accounts with 5h and weekly quotas', async () => {
+  it('formats quota accurately for Pro accounts with separate Gemini and Claude limits', async () => {
     const quota = await quotaService.fetchQuotaForAccount(mockProAccount);
     expect(quota.accountId).toBe(mockProAccount.id);
     expect(quota.fiveHourQuota).not.toBeNull();
     expect(quota.fiveHourQuota?.remainingPercent).toBeGreaterThanOrEqual(0);
     expect(quota.weeklyQuota.remainingPercent).toBeGreaterThanOrEqual(0);
+    expect(quota.geminiQuota).toBeDefined();
+    expect(quota.geminiQuota?.weeklyQuota.remainingPercent).toBeGreaterThanOrEqual(0);
+    expect(quota.claudeQuota).toBeDefined();
+    expect(quota.claudeQuota?.weeklyQuota.remainingPercent).toBeGreaterThanOrEqual(0);
     expect(quota.isStale).toBe(false);
   });
 
@@ -69,5 +73,14 @@ describe('QuotaService', () => {
 
     quotaService.setCachedQuota('acc-1', fakeQuota);
     expect(quotaService.getCachedQuota('acc-1')).toEqual(fakeQuota);
+  });
+
+  it('auto-detects Antigravity active user and plan tier when IDE language server is active', async () => {
+    const detected = await quotaService.detectActiveUserStatus();
+    if (detected) {
+      expect(detected.email).toBeDefined();
+      expect(['pro', 'plus', 'ultra', 'free']).toContain(detected.planTier);
+      expect(detected.planDisplayName).toBeDefined();
+    }
   });
 });

@@ -5,6 +5,7 @@ export interface AccountMeta {
   email: string;
   displayName: string;
   planTier: PlanTier;
+  planDisplayName?: string;
   isActive: boolean;
   addedAt: number;
 }
@@ -19,15 +20,25 @@ export interface QuotaBreakdown {
   remainingPercent: number; // 0 - 100
   totalLimit?: number;
   resetAtEpochMs: number;   // epoch ms
+  description?: string;
+}
+
+export interface ModelQuotaGroup {
+  name: string; // 'Gemini' | 'Claude & GPT'
+  weeklyQuota: QuotaBreakdown;
+  fiveHourQuota?: QuotaBreakdown | null;
 }
 
 export interface AccountQuota {
   accountId: string;
-  fiveHourQuota: QuotaBreakdown | null; // null for free tier
-  weeklyQuota: QuotaBreakdown;
+  geminiQuota?: ModelQuotaGroup;
+  claudeQuota?: ModelQuotaGroup;
+  fiveHourQuota: QuotaBreakdown | null; // Primary / fallback 5h quota
+  weeklyQuota: QuotaBreakdown;           // Primary / fallback weekly quota
   lastUpdated: number;                  // epoch ms
   isStale: boolean;
-  isRefreshed: boolean;                 // true if 5h quota has refreshed (e.g. >= 80% or reset time 0)
+  isRefreshed: boolean;                 // true if 5h quota has refreshed (e.g. >= 80% or reset time passed)
+  hasVerifiedData?: boolean;            // true if fetched from live Language Server or API, false if unverified
 }
 
 export type SortCriteria = 'quota_desc' | 'refresh_asc' | 'plan_tier' | 'alpha';

@@ -97,4 +97,32 @@ describe('AccountStore', () => {
     const storedTokens = await store.getTokens(acc.id);
     expect(storedTokens).toBeUndefined();
   });
+
+  it('auto-detects and activates an existing account when active email is detected', async () => {
+    const tokens: AccountTokens = { accessToken: 'a', refreshToken: 'r', expiresAt: 1000 };
+    const acc1 = await store.addAccount({ email: 'user1@gmail.com', displayName: 'User 1', planTier: 'pro', isActive: true }, tokens);
+    const acc2 = await store.addAccount({ email: 'user2@gmail.com', displayName: 'User 2', planTier: 'plus', isActive: false }, tokens);
+
+    const synced = await (store as any).syncActiveAccountFromIde('user2@gmail.com');
+    expect(synced?.id).toBe(acc2.id);
+    expect(store.getActiveAccount()?.id).toBe(acc2.id);
+    expect(store.getAccounts().find(a => a.id === acc1.id)?.isActive).toBe(false);
+  });
+
+  it('auto-imports a new account if detected IDE account does not exist in store', async () => {
+    const synced = await (store as any).syncActiveAccountFromIde('newbie@gmail.com', {
+      displayName: 'Newbie User',
+      planTier: 'pro',
+      planDisplayName: 'Google AI Pro'
+    }, {
+      accessToken: 'token-new',
+      refreshToken: '',
+      expiresAt: Date.now() + 3600000
+    });
+
+    expect(synced.email).toBe('newbie@gmail.com');
+    expect(synced.isActive).toBe(true);
+    expect(store.getActiveAccount()?.email).toBe('newbie@gmail.com');
+    expect(store.getAccounts().length).toBe(1);
+  });
 });

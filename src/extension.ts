@@ -10,7 +10,7 @@ export function activate(context: vscode.ExtensionContext) {
   const accountStore = new AccountStore(context.globalState, context.secrets);
   const authService = new AuthService();
   const quotaService = new QuotaService();
-  const switcherService = new SwitcherService(accountStore);
+  const switcherService = new SwitcherService(accountStore, authService, quotaService);
 
   // 2. Register Webview Provider
   const viewProvider = new AccSnipeViewProvider(

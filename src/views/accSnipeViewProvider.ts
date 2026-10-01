@@ -7,6 +7,21 @@ import { AccountMeta, AccountQuota, PlanTier, SortCriteria } from '../models/typ
 
 const STORAGE_KEY_SORT = 'accsnipe.preferences.sort';
 
+function formatCountdown(resetEpochMs?: number): string {
+  if (!resetEpochMs) return '--';
+  const diff = resetEpochMs - Date.now();
+  if (diff <= 0) return 'Refreshed!';
+
+  const totalMinutes = Math.floor(diff / (60 * 1000));
+  const days = Math.floor(totalMinutes / (24 * 60));
+  const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+  const minutes = totalMinutes % 60;
+
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+}
+
 export class AccSnipeViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'accsnipe.views.sidebar';
   private _view?: vscode.WebviewView;
@@ -18,7 +33,6 @@ export class AccSnipeViewProvider implements vscode.WebviewViewProvider {
     private readonly switcherService: SwitcherService,
     private readonly authService: AuthService
   ) {
-    // Listen for data model changes to refresh the UI
     this.accountStore.onDidChangeAccounts(() => this.updateWebview());
     this.quotaService.onDidChangeQuotas(() => this.updateWebview());
   }
@@ -49,6 +63,10 @@ export class AccSnipeViewProvider implements vscode.WebviewViewProvider {
           await this.handleDeleteAccount(message.accountId);
           break;
 
+        case 'editPlanTier':
+          await this.handleEditPlanTier(message.accountId);
+          break;
+
         case 'refreshQuotas':
           await this.handleRefreshAll();
           break;
@@ -68,31 +86,141 @@ export class AccSnipeViewProvider implements vscode.WebviewViewProvider {
     this._view.webview.html = this.getHtmlForWebview(this._view.webview);
   }
 
+  public async handleEditPlanTier(accountId: string): Promise<void> {
+    const acc = this.accountStore.getAccounts().find(a => a.id === accountId);
+    if (!acc) return;
+
+    const picked = await vscode.window.showQuickPick(
+      [
+        { label: 'Free Tier', description: 'Free plan (Gemini Flash only, no Claude models)', tier: 'free' },
+        { label: 'Google AI Pro', description: 'Pro plan with Gemini & Claude model quotas', tier: 'pro' },
+        { label: 'Google AI Plus', description: 'Plus plan', tier: 'plus' },
+        { label: 'Google AI Ultra', description: 'Ultra plan with highest quota', tier: 'ultra' }
+      ],
+      { placeHolder: `Select plan tier for ${acc.email} (current: ${acc.planTier.toUpperCase()})` }
+    );
+
+    if (picked) {
+      await this.accountStore.updateAccount(acc.id, {
+        planTier: picked.tier as PlanTier,
+        planDisplayName: picked.label
+      });
+      const updated = this.accountStore.getAccounts().find(a => a.id === acc.id);
+      if (updated) {
+        await this.quotaService.fetchQuotaForAccount(updated);
+      }
+      vscode.window.showInformationMessage(`AccSnipe: Updated ${acc.email} to ${picked.label}`);
+    }
+  }
+
   public async handleAddAccount(): Promise<void> {
     try {
-      const choice = await vscode.window.showQuickPick(
-        [
-          { label: '$(globe) Sign in with Google (Browser OAuth)', description: 'Opens browser consent screen to add account' },
-          { label: '$(edit) Enter Account Details Manually', description: 'Specify email and plan tier directly' }
-        ],
-        { placeHolder: 'Select how you want to add this Google account' }
-      );
+      const activeStatus = await this.quotaService.detectActiveUserStatus();
+
+      const options = [
+        ...(activeStatus ? [{
+          label: `$(sparkle) Auto-Import Active Account (${activeStatus.planDisplayName})`,
+          description: `${activeStatus.email} • Detected ${activeStatus.planTier.toUpperCase()}`,
+          isAutoDetect: true
+        }] : []),
+        {
+          label: '$(globe) Sign in with Google (Browser OAuth)',
+          description: 'Opens browser consent screen to add account'
+        },
+        {
+          label: '$(edit) Enter Account Details Manually',
+          description: 'Specify email and choose plan tier'
+        }
+      ];
+
+      const choice = await vscode.window.showQuickPick(options, {
+        placeHolder: 'Select how you want to add this Google account'
+      });
 
       if (!choice) return;
 
+      // 1. Auto-Import Current Active Antigravity Account
+      if ((choice as any).isAutoDetect && activeStatus) {
+        const existing = this.accountStore.getAccounts().find(a => a.email.toLowerCase() === activeStatus.email.toLowerCase());
+        if (existing) {
+          vscode.window.showInformationMessage(`Account ${activeStatus.email} is already in AccSnipe!`);
+          return;
+        }
+
+        let capturedTokens = {
+          accessToken: 'local_active_session',
+          refreshToken: '',
+          expiresAt: Date.now() + 30 * 86400000
+        };
+
+        const antigravityUss = (vscode as any).antigravityUnifiedStateSync;
+        if (antigravityUss?.OAuthPreferences?.getOAuthTokenInfo) {
+          try {
+            const currentTokenInfo = await antigravityUss.OAuthPreferences.getOAuthTokenInfo();
+            if (currentTokenInfo?.accessToken) {
+              capturedTokens = {
+                accessToken: currentTokenInfo.accessToken,
+                refreshToken: currentTokenInfo.refreshToken || '',
+                expiresAt: currentTokenInfo.expiryDateSeconds ? currentTokenInfo.expiryDateSeconds * 1000 : Date.now() + 3600000
+              };
+            }
+          } catch {}
+        }
+
+        const newAcc = await this.accountStore.addAccount({
+          email: activeStatus.email,
+          displayName: activeStatus.name,
+          planTier: activeStatus.planTier,
+          planDisplayName: activeStatus.planDisplayName,
+          isActive: true
+        }, capturedTokens);
+
+        await this.quotaService.fetchQuotaForAccount(newAcc, capturedTokens);
+        vscode.window.showInformationMessage(`AccSnipe: Connected ${activeStatus.email} with plan ${activeStatus.planDisplayName}!`);
+        return;
+      }
+
+      // 2. Sign In With Google (Browser OAuth)
       if (choice.label.includes('Browser OAuth')) {
         vscode.window.showInformationMessage('Opening Google authorization page in browser...');
         const result = await this.authService.loginWithGoogle();
-        
-        // Auto-detect tier or prompt user
-        const tierChoice = await vscode.window.showQuickPick(['pro', 'plus', 'free'], {
-          placeHolder: `Select active plan tier for ${result.email}`
-        }) as PlanTier | undefined;
+
+        let planTier: PlanTier = 'free';
+        let planDisplayName = 'Free Tier';
+
+        // Check if the signed in account matches the current active IDE session
+        if (activeStatus && activeStatus.email.toLowerCase() === result.email.toLowerCase()) {
+          planTier = activeStatus.planTier;
+          planDisplayName = activeStatus.planDisplayName;
+        } else {
+          // Probe Google Cloud Code endpoint using this account's access token
+          const tokenPlan = await this.quotaService.detectPlanTierFromToken(result.tokens.accessToken);
+          if (tokenPlan) {
+            planTier = tokenPlan.planTier;
+            planDisplayName = tokenPlan.planDisplayName;
+          } else {
+            // If auto-detection inconclusive, ask user (Free Tier as default!)
+            const picked = await vscode.window.showQuickPick(
+              [
+                { label: 'Free Tier', description: 'Free account (Gemini Flash only)', tier: 'free' },
+                { label: 'Google AI Pro', description: 'Paid plan (Gemini & Claude)', tier: 'pro' },
+                { label: 'Google AI Plus', description: 'Paid plan', tier: 'plus' },
+                { label: 'Google AI Ultra', description: 'Paid plan', tier: 'ultra' }
+              ],
+              { placeHolder: `Select plan tier for ${result.email}` }
+            );
+            if (picked) {
+              planTier = picked.tier as PlanTier;
+              planDisplayName = picked.label;
+            }
+          }
+        }
 
         await this.accountStore.addAccount({
           email: result.email,
           displayName: result.displayName,
-          planTier: tierChoice || 'pro',
+          planTier,
+          planDisplayName,
           isActive: this.accountStore.getAccounts().length === 0
         }, result.tokens);
 
@@ -101,23 +229,41 @@ export class AccSnipeViewProvider implements vscode.WebviewViewProvider {
           await this.quotaService.fetchQuotaForAccount(added, result.tokens);
         }
 
-        vscode.window.showInformationMessage(`AccSnipe: Connected ${result.email}!`);
+        vscode.window.showInformationMessage(`AccSnipe: Connected ${result.email} (${planDisplayName})!`);
       } else {
+        // 3. Manual Entry
         const email = await vscode.window.showInputBox({
           prompt: 'Enter Google account email',
           placeHolder: 'name@gmail.com'
         });
         if (!email) return;
 
-        const tier = await vscode.window.showQuickPick(['pro', 'plus', 'free'], {
-          placeHolder: `Select plan tier for ${email}`
-        }) as PlanTier | undefined;
-        if (!tier) return;
+        let planTier: PlanTier = 'free';
+        let planDisplayName = 'Free Tier';
+
+        if (activeStatus && activeStatus.email.toLowerCase() === email.toLowerCase()) {
+          planTier = activeStatus.planTier;
+          planDisplayName = activeStatus.planDisplayName;
+        } else {
+          const picked = await vscode.window.showQuickPick(
+            [
+              { label: 'Free Tier', description: 'Free account (Gemini Flash only)', tier: 'free' },
+              { label: 'Google AI Pro', description: 'Paid plan (Gemini & Claude)', tier: 'pro' },
+              { label: 'Google AI Plus', description: 'Paid plan', tier: 'plus' },
+              { label: 'Google AI Ultra', description: 'Paid plan', tier: 'ultra' }
+            ],
+            { placeHolder: `Select plan tier for ${email}` }
+          );
+          if (!picked) return;
+          planTier = picked.tier as PlanTier;
+          planDisplayName = picked.label;
+        }
 
         await this.accountStore.addAccount({
           email,
           displayName: email.split('@')[0],
-          planTier: tier,
+          planTier,
+          planDisplayName,
           isActive: this.accountStore.getAccounts().length === 0
         }, {
           accessToken: 'manual_token',
@@ -125,13 +271,12 @@ export class AccSnipeViewProvider implements vscode.WebviewViewProvider {
           expiresAt: Date.now() + 86400000
         });
 
-        // Trigger immediate quota baseline fetch
         const added = this.accountStore.getAccounts().find(a => a.email === email);
         if (added) {
           await this.quotaService.fetchQuotaForAccount(added);
         }
 
-        vscode.window.showInformationMessage(`AccSnipe: Added ${email} (${tier.toUpperCase()})`);
+        vscode.window.showInformationMessage(`AccSnipe: Added ${email} (${planDisplayName})`);
       }
     } catch (err: any) {
       vscode.window.showErrorMessage(`AccSnipe Error: ${err.message}`);
@@ -181,8 +326,8 @@ export class AccSnipeViewProvider implements vscode.WebviewViewProvider {
       list.sort((a, b) => {
         const qA = quotas.get(a.id);
         const qB = quotas.get(b.id);
-        const valA = qA?.fiveHourQuota ? qA.fiveHourQuota.remainingPercent : (qA?.weeklyQuota.remainingPercent ?? 0);
-        const valB = qB?.fiveHourQuota ? qB.fiveHourQuota.remainingPercent : (qB?.weeklyQuota.remainingPercent ?? 0);
+        const valA = qA?.geminiQuota?.weeklyQuota.remainingPercent ?? (qA?.weeklyQuota.remainingPercent ?? 0);
+        const valB = qB?.geminiQuota?.weeklyQuota.remainingPercent ?? (qB?.weeklyQuota.remainingPercent ?? 0);
         return valB - valA;
       });
     } else if (sort === 'refresh_asc') {
@@ -213,39 +358,45 @@ export class AccSnipeViewProvider implements vscode.WebviewViewProvider {
       <div style="text-align: center; padding: 36px 16px; color: var(--vscode-descriptionForeground); font-size: 12px;">
         <div style="font-size: 24px; margin-bottom: 8px;">🎯</div>
         <div style="font-weight: 600; color: var(--vscode-foreground); margin-bottom: 4px;">No Google Accounts Added</div>
-        <p style="margin-bottom: 16px; line-height: 1.5;">Connect your Google accounts to monitor 5h & weekly limits and snipe refreshed quotas.</p>
-        <button class="primary-btn" onclick="postMsg('addAccount')">＋ Add First Account</button>
+        <p style="margin-bottom: 16px; line-height: 1.5;">Connect your Google accounts to monitor Gemini & Claude limits and switch accounts.</p>
+        <button class="primary-btn" onclick="postMsg('addAccount')">＋ Add Account</button>
       </div>
     ` : accounts.map(acc => {
       const quota = quotas.get(acc.id);
       const isFree = acc.planTier === 'free';
-      const fiveHour = quota?.fiveHourQuota;
-      const weekly = quota?.weeklyQuota;
+      const hasVerified = quota?.hasVerifiedData !== false && (quota?.geminiQuota || quota?.claudeQuota);
 
-      const fiveHourPercent = fiveHour ? fiveHour.remainingPercent : 0;
-      const weeklyPercent = weekly ? weekly.remainingPercent : 0;
+      const gemini = quota?.geminiQuota;
+      const claude = quota?.claudeQuota;
 
-      const fiveHourColor = fiveHourPercent > 60 ? 'green' : (fiveHourPercent > 25 ? 'amber' : 'red');
-      const weeklyColor = weeklyPercent > 50 ? 'purple' : 'amber';
+      const gWeeklyPct = gemini ? gemini.weeklyQuota.remainingPercent : null;
+      const gWeeklyCountdown = gemini ? formatCountdown(gemini.weeklyQuota.resetAtEpochMs) : null;
+      const g5hPct = gemini?.fiveHourQuota ? gemini.fiveHourQuota.remainingPercent : null;
+      const g5hCountdown = gemini?.fiveHourQuota ? formatCountdown(gemini.fiveHourQuota.resetAtEpochMs) : null;
 
-      let refreshText = 'Calculating...';
-      if (fiveHour) {
-        const diffMins = Math.max(0, Math.round((fiveHour.resetAtEpochMs - Date.now()) / 60000));
-        refreshText = diffMins === 0 ? 'Quota Refreshed!' : `Refreshes in ${diffMins}m`;
-      } else if (weekly) {
-        const diffDays = Math.max(0, Math.round((weekly.resetAtEpochMs - Date.now()) / (24 * 3600000)));
-        refreshText = `Resets in ${diffDays}d`;
-      }
+      const cWeeklyPct = claude ? claude.weeklyQuota.remainingPercent : null;
+      const cWeeklyCountdown = claude ? formatCountdown(claude.weeklyQuota.resetAtEpochMs) : null;
+      const c5hPct = claude?.fiveHourQuota ? claude.fiveHourQuota.remainingPercent : null;
+      const c5hCountdown = claude?.fiveHourQuota ? formatCountdown(claude.fiveHourQuota.resetAtEpochMs) : null;
+
+      const getColor = (pct: number | null) => {
+        if (pct === null) return 'gray';
+        if (pct > 60) return 'green';
+        if (pct > 25) return 'amber';
+        return 'red';
+      };
 
       const isRefreshed = quota?.isRefreshed ?? false;
 
       return `
-        <div class="account-card ${acc.isActive ? 'active-account' : ''} ${quota?.isStale ? 'stale' : ''}">
+        <div class="account-card ${acc.isActive ? 'active-account' : ''}">
           <div class="card-top-row">
             <div class="user-info">
               <div class="user-email" title="${acc.email}">${acc.displayName || acc.email}</div>
               <div class="user-subtext">
-                <span class="tier-tag ${acc.planTier}">${acc.planTier.toUpperCase()}</span>
+                <span class="tier-tag ${acc.planTier}" title="Click to change plan tier" onclick="postMsg('editPlanTier', { accountId: '${acc.id}' })">
+                  ${acc.planTier.toUpperCase()} ✎
+                </span>
                 <span class="email-sub">${acc.email}</span>
               </div>
             </div>
@@ -261,38 +412,85 @@ export class AccSnipeViewProvider implements vscode.WebviewViewProvider {
             </div>
           </div>
 
-          <div class="quota-meters">
-            <div class="meter-box">
-              <div class="meter-head">
-                <span>5h Rolling</span>
-                <span class="meter-value">${isFree ? 'N/A (Free)' : fiveHourPercent + '%'}</span>
-              </div>
-              <div class="progress-track">
-                <div class="progress-fill ${fiveHourColor}" style="width: ${isFree ? 0 : fiveHourPercent}%;"></div>
-              </div>
+          <!-- Gemini Models Limit Breakdown -->
+          <div class="model-section">
+            <div class="section-title">
+              <span>✦ Gemini Models</span>
             </div>
-            <div class="meter-box">
-              <div class="meter-head">
-                <span>Weekly Limit</span>
-                <span class="meter-value">${weeklyPercent}%</span>
+            ${hasVerified ? `
+              <div class="quota-meters">
+                <div class="meter-box">
+                  <div class="meter-head">
+                    <span>Weekly</span>
+                    <span class="meter-value">${gWeeklyPct !== null ? gWeeklyPct + '%' : '--'}</span>
+                  </div>
+                  <div class="progress-track">
+                    <div class="progress-fill ${getColor(gWeeklyPct)}" style="width: ${gWeeklyPct ?? 0}%;"></div>
+                  </div>
+                  <div class="sub-timer">⏱ ${gWeeklyCountdown || '--'}</div>
+                </div>
+
+                <div class="meter-box">
+                  <div class="meter-head">
+                    <span>5-Hour</span>
+                    <span class="meter-value">${isFree ? 'N/A' : (g5hPct !== null ? g5hPct + '%' : '--')}</span>
+                  </div>
+                  <div class="progress-track">
+                    <div class="progress-fill ${getColor(g5hPct)}" style="width: ${g5hPct ?? 0}%;"></div>
+                  </div>
+                  <div class="sub-timer">${isFree ? 'Free Tier' : '⏱ ' + (g5hCountdown || '--')}</div>
+                </div>
               </div>
-              <div class="progress-track">
-                <div class="progress-fill ${weeklyColor}" style="width: ${weeklyPercent}%;"></div>
-              </div>
+            ` : `
+              <div class="awaiting-sync">Switch to this account to sync live quota</div>
+            `}
+          </div>
+
+          <!-- Claude and GPT Models Limit Breakdown -->
+          <div class="model-section">
+            <div class="section-title">
+              <span>✦ Claude & GPT Models</span>
             </div>
+            ${isFree ? `
+              <div class="not-included">Not included in Free tier</div>
+            ` : (hasVerified ? `
+              <div class="quota-meters">
+                <div class="meter-box">
+                  <div class="meter-head">
+                    <span>Weekly</span>
+                    <span class="meter-value">${cWeeklyPct !== null ? cWeeklyPct + '%' : '--'}</span>
+                  </div>
+                  <div class="progress-track">
+                    <div class="progress-fill ${getColor(cWeeklyPct)}" style="width: ${cWeeklyPct ?? 0}%;"></div>
+                  </div>
+                  <div class="sub-timer">⏱ ${cWeeklyCountdown || '--'}</div>
+                </div>
+
+                <div class="meter-box">
+                  <div class="meter-head">
+                    <span>5-Hour</span>
+                    <span class="meter-value">${c5hPct !== null ? c5hPct + '%' : '--'}</span>
+                  </div>
+                  <div class="progress-track">
+                    <div class="progress-fill ${getColor(c5hPct)}" style="width: ${c5hPct ?? 0}%;"></div>
+                  </div>
+                  <div class="sub-timer">⏱ ${c5hCountdown || '--'}</div>
+                </div>
+              </div>
+            ` : `
+              <div class="awaiting-sync">Switch to this account to sync live quota</div>
+            `)}
           </div>
 
           <div class="card-footer">
-            <div class="refresh-timer">
-              <span>⏱</span>
-              <span>${refreshText}</span>
-              ${quota?.isStale ? '<span style="color: #888; font-size: 9px;">(stale)</span>' : ''}
+            <div class="footer-status">
+              ${acc.isActive ? (isRefreshed ? '<span class="ready-badge">⚡ Ready</span>' : '<span class="in-use-badge">In Session</span>') : '<span class="in-use-badge">Inactive</span>'}
             </div>
             ${acc.isActive ? `
               <div class="active-label-btn">Active</div>
             ` : `
-              <button class="switch-btn ${isRefreshed ? 'refreshed' : ''}" onclick="postMsg('switchAccount', { accountId: '${acc.id}' })">
-                ${isRefreshed ? '⚡ Switch (Ready)' : 'Switch'}
+              <button class="switch-btn" onclick="postMsg('switchAccount', { accountId: '${acc.id}' })">
+                Switch Account
               </button>
             `}
           </div>
@@ -348,11 +546,8 @@ export class AccSnipeViewProvider implements vscode.WebviewViewProvider {
           }
           .account-card.active-account {
             border-color: #22c55e;
-            background: #152219;
+            background: #142217;
             box-shadow: 0 0 12px rgba(34, 197, 94, 0.12);
-          }
-          .account-card.stale {
-            opacity: 0.75;
           }
           .card-top-row {
             display: flex;
@@ -393,6 +588,11 @@ export class AccSnipeViewProvider implements vscode.WebviewViewProvider {
             border-radius: 3px;
             font-weight: 700;
             text-transform: uppercase;
+            cursor: pointer;
+          }
+          .tier-tag:hover {
+            opacity: 0.8;
+            outline: 1px dashed currentColor;
           }
           .tier-tag.pro { background: #581c87; color: #d8b4fe; border: 1px solid #7e22ce; }
           .tier-tag.plus { background: #1e3a8a; color: #93c5fd; border: 1px solid #2563eb; }
@@ -431,18 +631,46 @@ export class AccSnipeViewProvider implements vscode.WebviewViewProvider {
             color: #ef4444;
             background: rgba(239, 68, 68, 0.1);
           }
+
+          .model-section {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            background: rgba(0,0,0,0.22);
+            border-radius: 6px;
+            padding: 6px 8px;
+            border: 1px solid rgba(255,255,255,0.04);
+          }
+          .section-title {
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--vscode-foreground);
+            opacity: 0.85;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+          }
+          .not-included {
+            font-size: 9px;
+            color: var(--vscode-descriptionForeground);
+            font-style: italic;
+            padding: 4px 0;
+          }
+          .awaiting-sync {
+            font-size: 9px;
+            color: var(--vscode-descriptionForeground);
+            padding: 4px 0;
+          }
+
           .quota-meters {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: 6px;
-            background: rgba(0,0,0,0.2);
-            padding: 6px;
-            border-radius: 5px;
+            gap: 8px;
           }
           .meter-box {
             display: flex;
             flex-direction: column;
-            gap: 3px;
+            gap: 2px;
           }
           .meter-head {
             display: flex;
@@ -451,38 +679,51 @@ export class AccSnipeViewProvider implements vscode.WebviewViewProvider {
             color: var(--vscode-descriptionForeground);
           }
           .meter-value {
-            font-weight: 600;
+            font-weight: 700;
             color: var(--vscode-foreground);
-            font-size: 11px;
+            font-size: 10px;
           }
           .progress-track {
-            height: 5px;
+            height: 4px;
             background: rgba(255,255,255,0.08);
-            border-radius: 3px;
+            border-radius: 2px;
             overflow: hidden;
+            margin: 1px 0;
           }
           .progress-fill {
             height: 100%;
-            border-radius: 3px;
+            border-radius: 2px;
             transition: width 0.3s ease;
           }
           .progress-fill.green { background: #22c55e; }
           .progress-fill.amber { background: #f59e0b; }
           .progress-fill.red { background: #ef4444; }
-          .progress-fill.purple { background: #a855f7; }
+          .progress-fill.gray { background: #64748b; }
+
+          .sub-timer {
+            font-size: 8.5px;
+            color: #38bdf8;
+          }
 
           .card-footer {
             display: flex;
             align-items: center;
             justify-content: space-between;
             font-size: 10px;
+            margin-top: 2px;
           }
-          .refresh-timer {
+          .footer-status {
             display: flex;
             align-items: center;
             gap: 4px;
-            color: #38bdf8;
-            font-size: 10px;
+            font-size: 9.5px;
+          }
+          .ready-badge {
+            color: #4ade80;
+            font-weight: 700;
+          }
+          .in-use-badge {
+            color: var(--vscode-descriptionForeground);
           }
           .switch-btn {
             background: var(--vscode-button-background, #0e639c);
@@ -496,12 +737,6 @@ export class AccSnipeViewProvider implements vscode.WebviewViewProvider {
           }
           .switch-btn:hover {
             background: var(--vscode-button-hoverBackground, #1177bb);
-          }
-          .switch-btn.refreshed {
-            background: #16a34a;
-          }
-          .switch-btn.refreshed:hover {
-            background: #15803d;
           }
           .active-label-btn {
             color: #4ade80;
